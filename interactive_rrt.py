@@ -9,86 +9,74 @@ def main():
     physicsClient = p.connect(p.GUI)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -10)
-    planeId = p.loadURDF("plane.urdf")
-    
-    startPos = [0, 0, 0]
-    startOrientation = p.getQuaternionFromEuler([0, 0, 0])
-    
-    boxId = p.loadURDF("franka_panda/panda.urdf", startPos, startOrientation, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
 
-    active_joints = []
-    active_joint_names = []
-    limits = []
+    # create plane and robot
+    planeId = p.loadURDF("plane.urdf")
+    base_pos = [0, 0, 0]
+    base_orn = p.getQuaternionFromEuler([0, 0, 0])
+    boxId = p.loadURDF("franka_panda/panda.urdf", base_pos, base_orn, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
+
+    # find ee_link name 
     ee_link_name = "panda_grasptarget"
     ee_link_id = None
+    for i in range(p.getNumJoints(boxId)):
+        joint_info = p.getJointInfo(boxId, i)            
+        if str(joint_info[12].decode('utf-8')) == ee_link_name:
+            ee_link_id = joint_info[0]
+    if ee_link_id is None:
+        raise ValueError("EE link not found")
 
+    # reset position of robot
+    active_joints = []
+    limits = []
     for i in range(p.getNumJoints(boxId)):
         joint_info = p.getJointInfo(boxId, i)
         joint_type = joint_info[2]
         if joint_type == 0 or joint_type == 1: 
             active_joints.append(joint_info[0])
-            active_joint_names.append(joint_info[1])
-            limits.append(joint_info[8:10])
-            
-        if str(joint_info[12].decode('utf-8')) == ee_link_name:
-            ee_link_id = joint_info[0]
-
-    for i in range(len(active_joints)):
-        ll, ul = limits[i]
-        if ll >= ul:
-            ll, ul = -3.14159, 3.14159
-        mid_val = (ll + ul) / 2.0
-        p.resetJointState(boxId, active_joints[i], mid_val)
-
+            ll, ul = joint_info[8], joint_info[9]
+            if ll >= ul:
+                ll, ul = -3.14159, 3.14159
+            limits.append((ll, ul))
+            mid_val = (ll + ul) / 2.0
+            p.resetJointState(boxId, i, mid_val)
     p.stepSimulation()
 
-    joint_states = p.getJointStates(boxId, active_joints)
-    qi = np.array([state[0] for state in joint_states])
-    
-    if ee_link_id is not None:
-        ee_state = p.getLinkState(boxId, ee_link_id)
-        ee_pos = ee_state[0]
-        ee_euler = p.getEulerFromQuaternion(ee_state[1])
-    else:
-        ee_pos = [0, 0, 0]
-        ee_euler = [0, 0, 0]
+    # get state of ee_link
+    ee_state = p.getLinkState(boxId, ee_link_id)
+    ee_pos = ee_state[0]
+    ee_euler = p.getEulerFromQuaternion(ee_state[1])
 
     # --- Construct All UI Sliders ---
-    c_sliders = []
-    for i in range(len(active_joints)):
-        joint_name = active_joint_names[i].decode('utf-8')
-        lower_lim, upper_lim = limits[i]
-        if lower_lim >= upper_lim:
-            lower_lim, upper_lim = -3.14159, 3.14159
-        c_sliders.append(p.addUserDebugParameter(f"C-Goal: {joint_name}", lower_lim, upper_lim, qi[i]))
-    
-    btn_c_go = p.addUserDebugParameter("Plan & Go (C-Space)!", 1, 0, 0)
-    
-    ts_labels = ["T-Goal X", "T-Goal Y", "T-Goal Z", "T-Goal Roll", "T-Goal Pitch", "T-Goal Yaw"]
-    pos_eul = list(ee_pos) + list(ee_euler)
-    ts_bounds = [
-        (-1.0, 1.0, pos_eul[0]), (-1.0, 1.0, pos_eul[1]), ( 0.0, 1.5, pos_eul[2]),
-        (-3.14159, 3.14159, pos_eul[3]), (-3.14159, 3.14159, pos_eul[4]), (-3.14159, 3.14159, pos_eul[5])
+    # goal position sliders
+    ts_info = [
+        ("T-Goal X", -1.0, 1.0, ee_pos[0]), 
+        ("T-Goal Y", -1.0, 1.0, ee_pos[1]), 
+        ("T-Goal Z", 0.0, 1.5, ee_pos[2]), 
+        ("T-Goal Roll", -3.14159, 3.14159, ee_euler[0]), 
+        ("T-Goal Pitch", -3.14159, 3.14159, ee_euler[1]), 
+        ("T-Goal Yaw", -3.14159, 3.14159, ee_euler[2])
     ]
     ts_sliders = []
-    for label, b in zip(ts_labels, ts_bounds):
-        ts_sliders.append(p.addUserDebugParameter(label, b[0], b[1], b[2]))
+    for (label, ll, ul, val) in ts_info:
+        ts_sliders.append(p.addUserDebugParameter(label, ll, ul, val))
         
-    btn_ts_go = p.addUserDebugParameter("Plan & Go (T-Space)!", 1, 0, 0)
-    
-    obs_pos_sliders = [
-        p.addUserDebugParameter("Obs Pos X", -1.0, 1.0, 0.5),
-        p.addUserDebugParameter("Obs Pos Y", -1.0, 1.0, 0.0),
-        p.addUserDebugParameter("Obs Pos Z", 0.0, 1.5, 0.5)
-    ]
-    obs_dim_sliders = [
-        p.addUserDebugParameter("Obs Half-Length (X)", 0.01, 1.0, 0.1),
-        p.addUserDebugParameter("Obs Half-Width (Y)", 0.01, 1.0, 0.1),
-        p.addUserDebugParameter("Obs Half-Height (Z)", 0.01, 1.0, 0.1)
-    ]
-
-    prev_btn_c_val = p.readUserDebugParameter(btn_c_go)
+    btn_ts_go = p.addUserDebugParameter("Plan & Go!", 1, 0, 0)
     prev_btn_ts_val = p.readUserDebugParameter(btn_ts_go)
+    
+    # obstacle position sliders
+    obs_info = [
+        ("Obs Pos X", -1.0, 1.0, 0.5),
+        ("Obs Pos Y", -1.0, 1.0, 0.0),
+        ("Obs Pos Z", 0.0, 1.5, 0.5),
+        ("Obs Half-Length (X)", 0.01, 1.0, 0.1),
+        ("Obs Half-Width (Y)", 0.01, 1.0, 0.1),
+        ("Obs Half-Height (Z)", 0.01, 1.0, 0.1)
+    ]
+    obs_sliders = []
+    for (label, ll, ul, val) in obs_info:
+        obs_sliders.append(p.addUserDebugParameter(label, ll, ul, val))
+
 
     # Obstacle Setup in GUI Server
     gui_obs_id = None
@@ -98,8 +86,8 @@ def main():
 
     def update_gui_obstacle():
         nonlocal gui_obs_id, gui_obs_col, gui_obs_vis, last_obs_state
-        op = [p.readUserDebugParameter(s) for s in obs_pos_sliders]
-        od = [p.readUserDebugParameter(s) for s in obs_dim_sliders]
+        op = [p.readUserDebugParameter(s) for s in obs_sliders[:3]]
+        od = [p.readUserDebugParameter(s) for s in obs_sliders[3:]]
         current_state = op + od
         
         # Only rebuild if values actually changed to avoid flickering
@@ -110,10 +98,15 @@ def main():
             gui_obs_vis = p.createVisualShape(p.GEOM_BOX, halfExtents=od, rgbaColor=[1, 0.5, 0, 0.7])
             gui_obs_id = p.createMultiBody(baseMass=0, baseCollisionShapeIndex=gui_obs_col, baseVisualShapeIndex=gui_obs_vis, basePosition=op)
             last_obs_state = current_state
-
     update_gui_obstacle()
     
-    planner = RRTPlanner(urdf_path="franka_panda/panda.urdf", active_joints=active_joints, config_path="rrt_config.yaml")
+    # create path planner
+    planner = RRTPlanner(
+        urdf_path="franka_panda/panda.urdf", 
+        base_pos=base_pos, 
+        base_orn=base_orn, 
+        config_path="rrt_config.yaml"
+    )
 
     print("Welcome! Use the GUI widgets to set goals and obstacles.")
     qs = None
@@ -125,64 +118,17 @@ def main():
     
     try:
         while True:
-            c_go_val = p.readUserDebugParameter(btn_c_go)
             ts_go_val = p.readUserDebugParameter(btn_ts_go)
-            
-            trigger_plan = False
-            qf = None
-            
-            if c_go_val > prev_btn_c_val:
-                prev_btn_c_val = c_go_val
-                qf = np.array([p.readUserDebugParameter(sid) for sid in c_sliders])
-                print("Triggered C-Space Plan")
-                trigger_plan = True
-                
-            elif ts_go_val > prev_btn_ts_val:
+                      
+            if ts_go_val > prev_btn_ts_val:
                 prev_btn_ts_val = ts_go_val
-                if ee_link_id is None:
-                    print("Cannot plan in T-space, EE link not found.")
-                else:
-                    t_pos = [p.readUserDebugParameter(sid) for sid in ts_sliders[:3]]
-                    t_euler = [p.readUserDebugParameter(sid) for sid in ts_sliders[3:]]
-                    movable_joints = []
-                    ll_list = []
-                    ul_list = []
-                    jr_list = []
-                    rp_list = []
-                    for i in range(p.getNumJoints(boxId)):
-                        info = p.getJointInfo(boxId, i)
-                        if info[2] != p.JOINT_FIXED:
-                            movable_joints.append(i)
-                            ll, ul = info[8], info[9]
-                            if ll >= ul:
-                                ll, ul = -3.14159, 3.14159
-                            ll_list.append(ll)
-                            ul_list.append(ul)
-                            jr_list.append(ul - ll)
-                            rp_list.append((ll + ul) / 2.0)
-                            
-                    ik_sol = p.calculateInverseKinematics(
-                        boxId, ee_link_id, t_pos, p.getQuaternionFromEuler(t_euler),
-                        lowerLimits=ll_list,
-                        upperLimits=ul_list,
-                        jointRanges=jr_list,
-                        restPoses=rp_list,
-                        maxNumIterations=100,
-                        residualThreshold=1e-5
-                    )
-                    
-                    qf = np.zeros(len(active_joints))
-                    for i, joint_idx in enumerate(active_joints):
-                        if joint_idx in movable_joints:
-                            ik_idx = movable_joints.index(joint_idx)
-                            qf[i] = ik_sol[ik_idx]
-                            
-                    print(f"Triggered T-Space Plan. IK solved joint configuration: {qf}")
-                    trigger_plan = True
+                t_pos = [p.readUserDebugParameter(sid) for sid in ts_sliders[:3]]
+                t_euler = [p.readUserDebugParameter(sid) for sid in ts_sliders[3:]]
                 
-            if trigger_plan and qf is not None:
-                op = [p.readUserDebugParameter(s) for s in obs_pos_sliders]
-                od = [p.readUserDebugParameter(s) for s in obs_dim_sliders]
+                print(f"Triggered planning")
+                
+                op = [p.readUserDebugParameter(s) for s in obs_sliders[:3]]
+                od = [p.readUserDebugParameter(s) for s in obs_sliders[3:]]
                 planner.update_dynamic_obstacle(op, od)
                 
                 joint_states = p.getJointStates(boxId, active_joints)
@@ -194,7 +140,7 @@ def main():
                 tree_debug_items.clear()
                 
                 print("Planning RRT* path...")
-                path = planner.plan(qi, qf)
+                path = planner.plan_t_space(qi, ee_link_id, t_pos, t_euler)
                 
                 # Visualize all raw sampled points regardless of success
                 pts, _ = planner.get_tree_cartesian_nodes(ee_link_id)
@@ -232,12 +178,9 @@ def main():
                     qs = qs_hist
                     
                     # Hard-reset the previous button values to prevent multi-trigger queues 
-                    # from sliders manipulated DURING execution
-                    prev_btn_c_val = p.readUserDebugParameter(btn_c_go)
                     prev_btn_ts_val = p.readUserDebugParameter(btn_ts_go)
                 else:
                     print("Could not find a valid path to the goal configuration.")
-                    prev_btn_c_val = p.readUserDebugParameter(btn_c_go)
                     prev_btn_ts_val = p.readUserDebugParameter(btn_ts_go)
                     
             # T-Space Frame Visualizer continuously updates
@@ -272,12 +215,6 @@ def main():
         pass
     p.disconnect()
 
-    if qs is not None:
-        plt.plot(qs)
-        plt.title("RRT* Joint Trajectories (Last Run)")
-        plt.xlabel("Simulation Timesteps")
-        plt.ylabel("Joint Angles (rad)")
-        plt.show()
 
 if __name__ == "__main__":
     main()

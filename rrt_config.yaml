@@ -6,6 +6,8 @@ planner:
   collision_check_resolution: 0.05
   smoothing_iterations: 150
   goal_threshold: 0.1
+  early_exit: true
+  ik_retries: 5
   
   # Optionally override sampling limits for specific joints. 
   # Use 'null' to keep the default URDF limit.

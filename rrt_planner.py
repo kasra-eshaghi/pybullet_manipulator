@@ -12,17 +12,22 @@ class Node:
         self.cost = 0.0
 
 class RRTPlanner:
-    def __init__(self, urdf_path, active_joints, base_pos=None, base_orn=None, obstacle_ids=None, config_path="rrt_config.yaml"):
+    def __init__(self, urdf_path, base_pos=[0, 0, 0], base_orn=[0, 0, 0, 1], config_path="rrt_config.yaml"):
         self.client_id = p.connect(p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client_id)
         
-        base_pos = base_pos if base_pos is not None else [0, 0, 0]
-        base_orn = base_orn if base_orn is not None else [0, 0, 0, 1]
-        
         self.robot_id = p.loadURDF(urdf_path, basePosition=base_pos, baseOrientation=base_orn, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION, physicsClientId=self.client_id)
         
-        self.active_joints = active_joints
-        self.obstacle_ids = obstacle_ids if obstacle_ids is not None else []
+
+        # find active joints
+        num_joints = p.getNumJoints(self.robot_id, physicsClientId=self.client_id)
+        self.active_joints = []
+        for i in range(num_joints):
+            info = p.getJointInfo(self.robot_id, i, physicsClientId=self.client_id)
+            if info[2] == p.JOINT_REVOLUTE or info[2] == p.JOINT_PRISMATIC:
+                self.active_joints.append(i)
+        
+        self.obstacle_ids = []
         self.dynamic_obs_id = None
         
         with open(config_path, 'r') as f:
@@ -36,6 +41,8 @@ class RRTPlanner:
         self.collision_res = planner_cfg.get('collision_check_resolution', 0.05)
         self.smooth_iter = planner_cfg.get('smoothing_iterations', 150)
         self.goal_threshold = planner_cfg.get('goal_threshold', 0.1)
+        self.enable_early_exit = planner_cfg.get('early_exit', True)
+        self.ik_retries = planner_cfg.get('ik_retries', 5)
         
         weights = config.get('joint_weights', [])
         # pad weights if needed
@@ -109,6 +116,12 @@ class RRTPlanner:
             p.resetJointState(self.robot_id, joint_idx, q[i], physicsClientId=self.client_id)
             
     def check_state_collision(self, q: np.ndarray) -> bool:
+        # 1. Check joint limits
+        for i in range(len(self.active_joints)):
+            if q[i] < self.lower_limits[i] or q[i] > self.upper_limits[i]:
+                return True
+                
+        # 2. Check collision
         self.set_robot_state(q)
         p.performCollisionDetection(physicsClientId=self.client_id)
         
@@ -211,39 +224,35 @@ class RRTPlanner:
                             neighbor.cost = rewired_cost
                             
                 # Check early exit criteria
-                # TODO: add early exit as a pramameter so that it can be toggled on and off through the config file
-                if self.distance(new_node.q, goal_q) < self.goal_threshold:
-                    # if not self.check_path_collision(new_node.q, goal_q):
-                    #     final_node = Node(goal_q)
-                    #     final_node.parent = new_node
-                    #     final_node.cost = new_node.cost + self.distance(new_node.q, goal_q)
-                    #     tree.append(final_node)
+                if self.enable_early_exit and self.distance(new_node.q, goal_q) < self.goal_threshold:
                     print(f"Goal reached early at iteration {i}!")
                     break
 
 
-        # TODO: The logic for the next 9 lines is incorrect. Change it so that it finds the node in the tree that is within the goal_threshold and has the lowest cost. If no such node is found, then return goal_node = None. Right now it tries to connect close nodes to the goal_q. 
+        # Find the node within goal_threshold that has the lowest cost
         goal_node = None
-        min_goal_dist = float('inf')
+        min_cost = float('inf')
         for node in tree:
             dist = self.distance(node.q, goal_q)
             if dist <= self.goal_threshold:
-                if not self.check_path_collision(node.q, goal_q):
-                    if goal_node is None or node.cost + dist < goal_node.cost + min_goal_dist:
-                        goal_node = node
-                        min_goal_dist = dist
+                if node.cost < min_cost:
+                    goal_node = node
+                    min_cost = node.cost
                         
         if goal_node is None:
             print("Failed to find path to goal!")
             return []
         
-        # TODO: the block below should try to connect the goal node to goal_q if goal_node is not already goal_q. It should try to connect it by checking if the path is collision free. If it is, then it should add goal_q to the tree as a child of goal_node, an should change goal_node to this new node. Otherwise, it should just stick with the current goal_node.
+        # Try to connect goal_node exactly to goal_q directly if possible
         if self.distance(goal_node.q, goal_q) > 1e-6:
-            final_node = Node(goal_q)
-            final_node.parent = goal_node
-            tree.append(final_node)
-        else:
-            final_node = goal_node
+            if not self.check_path_collision(goal_node.q, goal_q):
+                final_node = Node(goal_q)
+                final_node.parent = goal_node
+                final_node.cost = goal_node.cost + self.distance(goal_node.q, goal_q)
+                tree.append(final_node)
+                goal_node = final_node
+        
+        final_node = goal_node
         
         # path planning
         path = []
@@ -261,6 +270,69 @@ class RRTPlanner:
         smooth_path = self.smooth_path(path)
 
         return smooth_path
+
+    def plan_t_space(self, start_q: np.ndarray, ee_link_id: int, t_pos: list, t_euler: list) -> list:
+        # Fetch IK limits constraints directly from our active joints limits
+        ll_list = []
+        ul_list = []
+        jr_list = []
+        movable_joints = []
+        for i in range(p.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
+            info = p.getJointInfo(self.robot_id, i, physicsClientId=self.client_id)
+            if info[2] != p.JOINT_FIXED:
+                movable_joints.append(i)
+                ll, ul = info[8], info[9]
+                if ll >= ul:
+                    ll, ul = -3.14159, 3.14159
+                ll_list.append(ll)
+                ul_list.append(ul)
+                jr_list.append(ul - ll)
+
+        for retry in range(self.ik_retries):
+            rp_list = []
+            for ll, ul in zip(ll_list, ul_list):
+                if retry == 0:
+                    rp_list.append((ll + ul) / 2.0)
+                else:
+                    # Randomize the null-space solver rest pose
+                    rp_list.append(random.uniform(ll, ul))
+                    
+            # Temporarily inject this randomized pose physically so the IK solver roots dynamically
+            for temp_i, temp_q in zip(movable_joints, rp_list):
+                 p.resetJointState(self.robot_id, temp_i, temp_q, physicsClientId=self.client_id)
+
+            ik_sol = p.calculateInverseKinematics(
+                self.robot_id, ee_link_id, t_pos, p.getQuaternionFromEuler(t_euler),
+                lowerLimits=ll_list,
+                upperLimits=ul_list,
+                jointRanges=jr_list,
+                restPoses=rp_list,
+                maxNumIterations=100,
+                residualThreshold=1e-5,
+                physicsClientId=self.client_id
+            )
+
+            qf = np.zeros(len(self.active_joints))
+            for i, joint_idx in enumerate(self.active_joints):
+                if joint_idx in movable_joints:
+                    ik_idx = movable_joints.index(joint_idx)
+                    qf[i] = ik_sol[ik_idx]
+                    
+            print(f"IK Target Derived (Attempt {retry+1}/{self.ik_retries}): {qf}")
+            
+            # Perform preemptive hardware collision check to skip 10000 RRT loops if inherently broken
+            if self.check_state_collision(qf):
+                 print(f"IK Attempt {retry+1} resulted in joint occlusion/collision. Rerolling alternate posture...")
+                 continue
+                 
+            path = self.plan(start_q, qf)
+            if path:
+                return path
+                
+            print(f"RRT* failed to connect IK attempt {retry+1}. Rooting new alternative elbow pose...")
+            
+        print("Exhausted all IK alternative permutations. Path planning comprehensively failed.")
+        return []
 
     def get_tree_cartesian_nodes(self, ee_link_id):
         """Extracts the end-effector Cartesian [X, Y, Z] for every node and its parent in the last planned tree."""
