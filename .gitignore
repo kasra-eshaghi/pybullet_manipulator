@@ -1,1 +1,4 @@
 *.pyc
+bullet3/
+CAD_files/
+meshes/

@@ -12,7 +12,7 @@ class Node:
         self.cost = 0.0
 
 class RRTPlanner:
-    def __init__(self, urdf_path, base_pos=[0, 0, 0], base_orn=[0, 0, 0, 1], config_path="rrt_config.yaml"):
+    def __init__(self, urdf_path, ee_link_name, base_pos=[0, 0, 0], base_orn=[0, 0, 0, 1], config_path="rrt_config.yaml"):
         self.client_id = p.connect(p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client_id)
         
@@ -26,6 +26,14 @@ class RRTPlanner:
             info = p.getJointInfo(self.robot_id, i, physicsClientId=self.client_id)
             if info[2] == p.JOINT_REVOLUTE or info[2] == p.JOINT_PRISMATIC:
                 self.active_joints.append(i)
+                
+        self.ee_link_id = None
+        for i in range(num_joints):
+            joint_info = p.getJointInfo(self.robot_id, i, physicsClientId=self.client_id)
+            if str(joint_info[12].decode('utf-8')) == ee_link_name:
+                self.ee_link_id = joint_info[0]
+        if self.ee_link_id is None:
+            raise ValueError(f"End effector link '{ee_link_name}' not found in URDF.")
         
         self.obstacle_ids = []
         self.dynamic_obs_id = None
@@ -43,6 +51,9 @@ class RRTPlanner:
         self.goal_threshold = planner_cfg.get('goal_threshold', 0.1)
         self.enable_early_exit = planner_cfg.get('early_exit', True)
         self.ik_retries = planner_cfg.get('ik_retries', 5)
+        self.ik_distinct_threshold = planner_cfg.get('ik_distinct_threshold', 0.2)
+        self.constraint_pos_tol = planner_cfg.get('constraint_pos_tol', 0.02)
+        self.constraint_orn_tol = planner_cfg.get('constraint_orn_tol', 0.05)
         
         weights = config.get('joint_weights', [])
         # pad weights if needed
@@ -148,10 +159,57 @@ class RRTPlanner:
             if self.check_state_collision(q_interp):
                 return True
         return False
+        
+    def _slerp(self, q1: np.ndarray, q2: np.ndarray, t: float) -> np.ndarray:
+        dot = np.dot(q1, q2)
+        if dot < 0.0:
+            q2 = -np.array(q2)
+            dot = -dot
+        if dot > 0.9995:
+            res = np.array(q1) + t * (np.array(q2) - np.array(q1))
+            return res / np.linalg.norm(res)
+        theta_0 = np.arccos(dot)
+        sin_theta_0 = np.sin(theta_0)
+        theta = theta_0 * t
+        sin_theta = np.sin(theta)
+        s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
+        s1 = sin_theta / sin_theta_0
+        return (s0 * np.array(q1)) + (s1 * np.array(q2))
+        
+    def check_constrained_path(self, q1: np.ndarray, q2: np.ndarray, path_func, project_func) -> bool:
+        dist = self.distance(q1, q2)
+        n_steps = max(2, int(dist / self.collision_res))
+        for i in range(1, n_steps + 1):
+            t = i / n_steps
+            q_interp = q1 + t * (q2 - q1)
+            
+            # 1. State collision
+            if self.check_state_collision(q_interp):
+                return True
+                
+            # 2. Constraint validation (forward kinematics vs theoretical path)
+            self.set_robot_state(q_interp)
+            fk_state = p.getLinkState(self.robot_id, self.ee_link_id, physicsClientId=self.client_id)
+            fk_pos, fk_quat = np.array(fk_state[0]), np.array(fk_state[1])
+            
+            s_interp = project_func(fk_pos)
+            target_pos, target_quat = path_func(s_interp)
+            
+            pos_err = np.linalg.norm(fk_pos - target_pos)
+            if pos_err > self.constraint_pos_tol:
+                return True
+                
+            # Orn error
+            dot = np.clip(np.abs(np.dot(fk_quat, target_quat)), 0.0, 1.0)
+            orn_err = 2 * np.arccos(dot)
+            if orn_err > self.constraint_orn_tol:
+                return True
+                
+        return False
 
-    def sample(self, goal_q: np.ndarray) -> np.ndarray:
-        if random.random() < self.goal_bias:
-            return goal_q
+    def sample(self, goal_qs: list) -> np.ndarray:
+        if random.random() < self.goal_bias and goal_qs:
+            return random.choice(goal_qs)
         else:
             return np.random.uniform(self.lower_limits, self.upper_limits)
             
@@ -174,22 +232,23 @@ class RRTPlanner:
                 neighbors.append(node)
         return neighbors
 
-    def plan(self, start_q: np.ndarray, goal_q: np.ndarray) -> list:
+    def plan(self, start_q: np.ndarray, goal_qs: list) -> list:
         start_node = Node(start_q)
         tree = [start_node]
         
         if self.check_state_collision(start_q):
             print("Start state is in collision!")
             return []
-        if self.check_state_collision(goal_q):
-            print("Goal state is in collision!")
+            
+        if not goal_qs:
+            print("No valid target states provided!")
             return []
 
-        print(f"Planning RRT* path (max_iter: {self.max_iter})...")
+        print(f"Planning RRT* path across {len(goal_qs)} target IK distributions (max_iter: {self.max_iter})...")
         
         for i in range(self.max_iter):
             # generate new node
-            q_rand = self.sample(goal_q)
+            q_rand = self.sample(goal_qs)
             nearest_node = self.nearest(tree, q_rand)
             q_new = self.steer(nearest_node, q_rand)
             
@@ -224,31 +283,39 @@ class RRTPlanner:
                             neighbor.cost = rewired_cost
                             
                 # Check early exit criteria
-                if self.enable_early_exit and self.distance(new_node.q, goal_q) < self.goal_threshold:
-                    print(f"Goal reached early at iteration {i}!")
-                    break
+                if self.enable_early_exit:
+                    for idx, gq in enumerate(goal_qs):
+                        if self.distance(new_node.q, gq) < self.goal_threshold:
+                            print(f"Goal {idx} reached early at iteration {i}!")
+                            return self._finalize_path(tree, goal_qs, start_q)
 
+        return self._finalize_path(tree, goal_qs, start_q)
 
+    def _finalize_path(self, tree, goal_qs, start_q):
         # Find the node within goal_threshold that has the lowest cost
         goal_node = None
         min_cost = float('inf')
-        for node in tree:
-            dist = self.distance(node.q, goal_q)
-            if dist <= self.goal_threshold:
-                if node.cost < min_cost:
-                    goal_node = node
-                    min_cost = node.cost
+        best_gq = None
+        
+        for gq in goal_qs:
+            for node in tree:
+                dist = self.distance(node.q, gq)
+                if dist <= self.goal_threshold:
+                    if node.cost < min_cost:
+                        goal_node = node
+                        min_cost = node.cost
+                        best_gq = gq
                         
         if goal_node is None:
             print("Failed to find path to goal!")
             return []
         
-        # Try to connect goal_node exactly to goal_q directly if possible
-        if self.distance(goal_node.q, goal_q) > 1e-6:
-            if not self.check_path_collision(goal_node.q, goal_q):
-                final_node = Node(goal_q)
+        # Try to connect goal_node exactly to best_gq directly if possible
+        if self.distance(goal_node.q, best_gq) > 1e-6:
+            if not self.check_path_collision(goal_node.q, best_gq):
+                final_node = Node(best_gq)
                 final_node.parent = goal_node
-                final_node.cost = goal_node.cost + self.distance(goal_node.q, goal_q)
+                final_node.cost = goal_node.cost + self.distance(goal_node.q, best_gq)
                 tree.append(final_node)
                 goal_node = final_node
         
@@ -271,38 +338,26 @@ class RRTPlanner:
 
         return smooth_path
 
-    def plan_t_space(self, start_q: np.ndarray, ee_link_id: int, t_pos: list, t_euler: list) -> list:
-        # Fetch IK limits constraints directly from our active joints limits
-        ll_list = []
-        ul_list = []
-        jr_list = []
-        movable_joints = []
-        for i in range(p.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
-            info = p.getJointInfo(self.robot_id, i, physicsClientId=self.client_id)
-            if info[2] != p.JOINT_FIXED:
-                movable_joints.append(i)
-                ll, ul = info[8], info[9]
-                if ll >= ul:
-                    ll, ul = -3.14159, 3.14159
-                ll_list.append(ll)
-                ul_list.append(ul)
-                jr_list.append(ul - ll)
-
-        for retry in range(self.ik_retries):
+    def _get_ik_solutions(self, target_pos, target_quat, retries: int):
+        ll_list = self.lower_limits.tolist()
+        ul_list = self.upper_limits.tolist()
+        jr_list = (self.upper_limits - self.lower_limits).tolist()
+        movable_joints = self.active_joints
+        
+        valid_goal_qs = []
+        for retry in range(retries):
             rp_list = []
             for ll, ul in zip(ll_list, ul_list):
                 if retry == 0:
                     rp_list.append((ll + ul) / 2.0)
                 else:
-                    # Randomize the null-space solver rest pose
                     rp_list.append(random.uniform(ll, ul))
                     
-            # Temporarily inject this randomized pose physically so the IK solver roots dynamically
             for temp_i, temp_q in zip(movable_joints, rp_list):
                  p.resetJointState(self.robot_id, temp_i, temp_q, physicsClientId=self.client_id)
 
             ik_sol = p.calculateInverseKinematics(
-                self.robot_id, ee_link_id, t_pos, p.getQuaternionFromEuler(t_euler),
+                self.robot_id, self.ee_link_id, target_pos, target_quat,
                 lowerLimits=ll_list,
                 upperLimits=ul_list,
                 jointRanges=jr_list,
@@ -318,23 +373,164 @@ class RRTPlanner:
                     ik_idx = movable_joints.index(joint_idx)
                     qf[i] = ik_sol[ik_idx]
                     
-            print(f"IK Target Derived (Attempt {retry+1}/{self.ik_retries}): {qf}")
-            
-            # Perform preemptive hardware collision check to skip 10000 RRT loops if inherently broken
             if self.check_state_collision(qf):
-                 print(f"IK Attempt {retry+1} resulted in joint occlusion/collision. Rerolling alternate posture...")
                  continue
                  
-            path = self.plan(start_q, qf)
-            if path:
-                return path
+            is_distinct = True
+            for existing_q in valid_goal_qs:
+                if self.distance(qf, existing_q) < self.ik_distinct_threshold:
+                    is_distinct = False
+                    break
+                    
+            if is_distinct:
+                valid_goal_qs.append(qf)
                 
-            print(f"RRT* failed to connect IK attempt {retry+1}. Rooting new alternative elbow pose...")
-            
-        print("Exhausted all IK alternative permutations. Path planning comprehensively failed.")
-        return []
+        return valid_goal_qs
 
-    def get_tree_cartesian_nodes(self, ee_link_id):
+    def plan_t_space(self, start_q: np.ndarray, t_pos: list, t_euler: list) -> list:
+        target_quat = p.getQuaternionFromEuler(t_euler)
+        valid_goal_qs = self._get_ik_solutions(t_pos, target_quat, self.ik_retries)
+                
+        if not valid_goal_qs:
+            print("Failed to pull any valid collision-free IK distributions from Null-Space.")
+            return []
+        else:
+            print(f"Valid Distinct IK Solution Extracted: {len(valid_goal_qs)} solutions")
+            
+        return self.plan(start_q, valid_goal_qs)
+
+    def plan_constrained(self, start_qs: list, goal_qs: list, path_func, project_func) -> dict:
+        tree = []
+        for sq in start_qs:
+            tree.append(Node(sq))
+            
+        print(f"Planning Constrained Task Space RRT* ({len(start_qs)} start configs -> {len(goal_qs)} goal configs, max_iter: {self.max_iter})...")
+        
+        for i in range(self.max_iter):
+            s_rand = random.uniform(0.0, 1.0)
+            target_pos, target_quat = path_func(s_rand)
+            
+            try_goal = False
+            if random.random() < self.goal_bias and goal_qs:
+                q_rand = random.choice(goal_qs)
+                try_goal = True
+            else:
+                q_rands = self._get_ik_solutions(target_pos, target_quat, retries=1)
+                if not q_rands:
+                    continue
+                q_rand = random.choice(q_rands)
+                
+            nearest_node = min(tree, key=lambda node: self.distance(node.q, q_rand))
+            
+            dist = self.distance(nearest_node.q, q_rand)
+            if dist < self.step_size:
+                q_new = q_rand
+            else:
+                scale = self.step_size / dist
+                q_new = nearest_node.q + scale * (q_rand - nearest_node.q)
+                
+            if not self.check_constrained_path(nearest_node.q, q_new, path_func, project_func):
+                new_node = Node(q_new)
+                
+                neighbors = self.get_neighbors(tree, new_node)
+                
+                min_cost_node = nearest_node
+                min_cost = nearest_node.cost + self.distance(nearest_node.q, new_node.q)
+                for neighbor in neighbors:
+                    cost = neighbor.cost + self.distance(neighbor.q, new_node.q)
+                    if cost < min_cost:
+                        if not self.check_constrained_path(neighbor.q, new_node.q, path_func, project_func):
+                            min_cost_node = neighbor
+                            min_cost = cost
+                            
+                new_node.parent = min_cost_node
+                new_node.cost = min_cost
+                tree.append(new_node)
+                
+                for neighbor in neighbors:
+                    rewired_cost = new_node.cost + self.distance(new_node.q, neighbor.q)
+                    if rewired_cost < neighbor.cost:
+                        if not self.check_constrained_path(new_node.q, neighbor.q, path_func, project_func):
+                            neighbor.parent = new_node
+                            neighbor.cost = rewired_cost
+                            
+        # Post-process tree to extract all valid root-mapped paths
+        valid_paths = {}
+        for node in tree:
+            for gq in goal_qs:
+                if self.distance(node.q, gq) <= self.goal_threshold:
+                    if not self.check_constrained_path(node.q, gq, path_func, project_func):
+                        # Construct valid path backwards
+                        path = [gq]
+                        curr = node
+                        while curr is not None:
+                            path.append(curr.q)
+                            curr = curr.parent
+                        path.reverse()
+                        
+                        root_tuple = tuple(path[0])
+                        c_cost = 0.0
+                        for c_i in range(len(path)-1):
+                            c_cost += self.distance(path[c_i], path[c_i+1])
+                        
+                        # Cache the most optimal route identified originating from this specific root
+                        if root_tuple not in valid_paths:
+                            valid_paths[root_tuple] = (path, c_cost)
+                        else:
+                            if c_cost < valid_paths[root_tuple][1]:
+                                valid_paths[root_tuple] = (path, c_cost)
+                                
+        final_dict = {}
+        for r_key, (path, c_cost) in valid_paths.items():
+            final_dict[r_key] = path
+            
+        print(f"Constrained exploration concluded. Discovered spanning routes tied to {len(final_dict)} independent start configurations!")
+        return final_dict
+
+    def plan_constrained_t_space(self, start_pos, start_euler, goal_pos, goal_euler) -> dict:
+        start_pos = np.array(start_pos)
+        start_quat = p.getQuaternionFromEuler(start_euler)
+        goal_pos = np.array(goal_pos)
+        goal_quat = p.getQuaternionFromEuler(goal_euler)
+        
+        def path_func(s):
+            s = np.clip(s, 0.0, 1.0)
+            p_interp = start_pos + s * (goal_pos - start_pos)
+            q_interp = self._slerp(start_quat, goal_quat, s)
+            return p_interp, q_interp
+            
+        def project_func(pos):
+            vec_a = start_pos
+            vec_b = goal_pos
+            vec_p = np.array(pos)
+            
+            line_vec = vec_b - vec_a
+            sq_len = np.dot(line_vec, line_vec)
+            if sq_len < 1e-8:
+                return 0.0
+                
+            s = np.dot(vec_p - vec_a, line_vec) / sq_len
+            return float(np.clip(s, 0.0, 1.0))
+            
+        print("Pre-validating constrained task-space feasibility...")
+        for s in np.linspace(0, 1, 25):
+            p_s, q_s = path_func(s)
+            sol = self._get_ik_solutions(p_s, q_s, retries=max(1, self.ik_retries))
+            if not sol:
+                print(f"Task space path is fully occluded or mathematically unreachable at s={s:.2f}. Aborting.")
+                return {}
+                
+        print("Feasibility check passed. Acquiring start and goal multi-roots...")
+        start_qs = self._get_ik_solutions(start_pos, start_quat, retries=self.ik_retries*2)
+        goal_qs = self._get_ik_solutions(goal_pos, goal_quat, retries=self.ik_retries*2)
+        
+        if not start_qs or not goal_qs:
+            print("Failed to secure valid multi-root clusters for either start or goal. Aborting.")
+            return {}
+            
+        return self.plan_constrained(start_qs, goal_qs, path_func, project_func)
+
+    def get_tree_cartesian_nodes(self):
         """Extracts the end-effector Cartesian [X, Y, Z] for every node and its parent in the last planned tree."""
         if not hasattr(self, 'last_tree') or not self.last_tree:
             return [], []
@@ -348,7 +544,7 @@ class RRTPlanner:
             q_tuple = tuple(node.q)
             if q_tuple not in q_to_pos:
                 self.set_robot_state(node.q)
-                pos = p.getLinkState(self.robot_id, ee_link_id, physicsClientId=self.client_id)[0]
+                pos = p.getLinkState(self.robot_id, self.ee_link_id, physicsClientId=self.client_id)[0]
                 q_to_pos[q_tuple] = pos
             points.append(q_to_pos[q_tuple])
             

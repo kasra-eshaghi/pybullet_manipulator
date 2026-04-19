@@ -103,6 +103,7 @@ def main():
     # create path planner
     planner = RRTPlanner(
         urdf_path="franka_panda/panda.urdf", 
+        ee_link_name="panda_grasptarget",
         base_pos=base_pos, 
         base_orn=base_orn, 
         config_path="rrt_config.yaml"
@@ -140,10 +141,10 @@ def main():
                 tree_debug_items.clear()
                 
                 print("Planning RRT* path...")
-                path = planner.plan_t_space(qi, ee_link_id, t_pos, t_euler)
+                path = planner.plan_t_space(qi, t_pos, t_euler)
                 
                 # Visualize all raw sampled points regardless of success
-                pts, _ = planner.get_tree_cartesian_nodes(ee_link_id)
+                pts, _ = planner.get_tree_cartesian_nodes()
                 if pts:
                     batch_size = 500
                     for i in range(0, len(pts), batch_size):

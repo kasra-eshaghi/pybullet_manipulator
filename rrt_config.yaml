@@ -1,5 +1,5 @@
 planner:
-  max_iterations: 10000
+  max_iterations: 2000
   step_size: 0.1
   goal_bias: 0.2
   rewire_radius: 0.5
@@ -8,6 +8,9 @@ planner:
   goal_threshold: 0.1
   early_exit: true
   ik_retries: 5
+  ik_distinct_threshold: 0.2
+  constraint_pos_tol: 0.005
+  constraint_orn_tol: 0.05
   
   # Optionally override sampling limits for specific joints. 
   # Use 'null' to keep the default URDF limit.
