@@ -2,6 +2,7 @@ import numpy as np
 import pybullet as p
 import time
 import pybullet_data
+import matplotlib.pyplot as plt
 from rrt_planner import RRTPlanner
 
 def main():
@@ -117,6 +118,7 @@ def main():
     step_counter = 0
     frame_debug_ids = {}   # Dict tracking drawing IDs for dynamic updates
     connecting_line_id = -1
+    trajectory_line_ids = []
     
     def execute_trajectory(path, traj_time=5.0, is_constrained=False, s_pos=None, g_pos=None):
         trajectory_eval = planner.generate_trajectory(path, traj_time)
@@ -126,7 +128,7 @@ def main():
         exec_points = []
         
         while current_time <= traj_time:
-            q_t, q_dot_t, _ = trajectory_eval(current_time)
+            q_t, q_dot_t, q_ddot_t = trajectory_eval(current_time)
             p.setJointMotorControlArray(
                 boxId, active_joints, p.POSITION_CONTROL, 
                 targetPositions=q_t, targetVelocities=q_dot_t,
@@ -139,8 +141,19 @@ def main():
                 fk_pos = np.array(ee_state[0])
                 exec_points.append(fk_pos)
                 
-                s = current_time / traj_time
-                target_pos = np.array(s_pos) + s * (np.array(g_pos) - np.array(s_pos))
+                # Project FK position orthogonally onto constraint vector to find TRUE geometric s
+                vec_a = np.array(s_pos)
+                vec_b = np.array(g_pos)
+                line_vec = vec_b - vec_a
+                sq_len = np.dot(line_vec, line_vec)
+                
+                if sq_len > 1e-8:
+                    s_true = np.dot(fk_pos - vec_a, line_vec) / sq_len
+                    s_true = float(np.clip(s_true, 0.0, 1.0))
+                else:
+                    s_true = 0.0
+                
+                target_pos = vec_a + s_true * line_vec
                 
                 dist = np.linalg.norm(fk_pos - target_pos)
                 if dist > max_dist:
@@ -151,9 +164,14 @@ def main():
             
         if is_constrained:
             print(f"Max trajectory physics deviation across constraint vector: {max_dist:.5f} meters")
+            
+            # Subsample lines to avoid PyBullet buffer overflow (causing User Debug Draw Failed / X11 Crash)
+            step_draw = max(1, len(exec_points) // 200)
             if len(exec_points) > 1:
-                for i in range(1, len(exec_points)):
-                    p.addUserDebugLine(exec_points[i-1].tolist(), exec_points[i].tolist(), lineColorRGB=[1, 0, 1], lineWidth=4)
+                for i in range(step_draw, len(exec_points), step_draw):
+                    lid = p.addUserDebugLine(exec_points[i-step_draw].tolist(), exec_points[i].tolist(), lineColorRGB=[1, 0, 1], lineWidth=4)
+                    trajectory_line_ids.append(lid)
+                    
 
     try:
         while True:
@@ -161,6 +179,11 @@ def main():
                       
             if go_val > prev_btn_val:
                 prev_btn_val = go_val
+                
+                # Clear previous trajectory lines
+                for lid in trajectory_line_ids:
+                    p.removeUserDebugItem(lid)
+                trajectory_line_ids.clear()
                 
                 s_pos = [p.readUserDebugParameter(sid) for sid in start_sliders[:3]]
                 s_euler = [p.readUserDebugParameter(sid) for sid in start_sliders[3:]]
@@ -207,18 +230,7 @@ def main():
                         else:
                             print("CRITICAL LOGIC ERROR: Transit path reached a node not registered in Stage 2 mapping!")
                     else:
-                        print("Standard RRT transit aborted! Fallback: Snapping directly to optimal Start Pose.")
-                        fallback_tuple = list(valid_paths_dict.keys())[0]
-                        for i, j_idx in enumerate(active_joints):
-                            p.resetJointState(boxId, j_idx, fallback_tuple[i])
-                        for i, j_idx in enumerate(active_joints):
-                            p.setJointMotorControl2(boxId, j_idx, p.POSITION_CONTROL, targetPosition=fallback_tuple[i], force=100)
-                        for _ in range(10):
-                            p.stepSimulation()
-                            
-                        c_path = valid_paths_dict[fallback_tuple]
-                        print(f"\n --- Stage 2: Constrained path execution beginning! ({len(c_path)} nodes) ---")
-                        execute_trajectory(c_path, is_constrained=True, s_pos=s_pos, g_pos=g_pos)
+                        print("No path found from start to any of the valid start roots. Try again.")
                     
                 prev_btn_val = p.readUserDebugParameter(btn_go)
                 
@@ -270,6 +282,7 @@ def main():
 
             p.stepSimulation()
             time.sleep(1./240.)
+            plt.pause(0.001)
             step_counter += 1
                 
     except KeyboardInterrupt:

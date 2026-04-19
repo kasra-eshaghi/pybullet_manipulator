@@ -622,9 +622,10 @@ class RRTPlanner:
                 
             tau = t - ti
             
-            q_tau = qi + (qf - qi) * (3*np.power(tau, 2)/np.power(T, 2) - 2*np.power(tau, 3)/np.power(T, 3))
-            q_dot = (qf - qi) * (6*tau/np.power(T, 2) - 6*np.power(tau, 2)/np.power(T, 3))
-            q_ddot = (qf - qi) * (6/np.power(T, 2) - 12*tau/np.power(T, 3))
+            # Linear interpolation (constant continuous velocity, zero acceleration breakpoints)
+            q_tau = qi + (qf - qi) * (tau / T)
+            q_dot = (qf - qi) / T
+            q_ddot = np.zeros_like(qf)
             
             return q_tau, q_dot, q_ddot
             
