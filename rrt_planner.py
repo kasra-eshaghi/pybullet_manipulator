@@ -482,7 +482,7 @@ class RRTPlanner:
                                 
         final_dict = {}
         for r_key, (path, c_cost) in valid_paths.items():
-            final_dict[r_key] = path
+            final_dict[r_key] = self.smooth_constrained_path(path, path_func, project_func)
             
         print(f"Constrained exploration concluded. Discovered spanning routes tied to {len(final_dict)} independent start configurations!")
         return final_dict
@@ -579,6 +579,31 @@ class RRTPlanner:
         print(f"Smoothed path down to {len(smoothed_path)} waypoints")
         return smoothed_path
 
+    def smooth_constrained_path(self, path: list, path_func, project_func) -> list:
+        if len(path) <= 2:
+            return path
+            
+        print("Smoothing constrained path...")
+        smoothed_path = list(path)
+        
+        for _ in range(self.smooth_iter):
+            if len(smoothed_path) <= 2:
+                break
+            i = random.randint(0, len(smoothed_path) - 2)
+            j = random.randint(i + 1, len(smoothed_path) - 1)
+            
+            if j - i <= 1:
+                continue
+                
+            q_i = smoothed_path[i]
+            q_j = smoothed_path[j]
+            
+            if not self.check_constrained_path(q_i, q_j, path_func, project_func):
+                smoothed_path = smoothed_path[:i+1] + smoothed_path[j:]
+                
+        print(f"Smoothed constrained path down to {len(smoothed_path)} waypoints")
+        return smoothed_path
+
     def generate_trajectory(self, path: list, total_time: float):
         if not path:
             return None
@@ -593,7 +618,7 @@ class RRTPlanner:
             
         total_dist = sum(distances)
         if total_dist == 0:
-             return lambda t: (path[0], np.zeros_like(path[0]), np.zeros_like(path[0]))
+             return lambda t: (path[0], np.zeros_like(path[0]), np.zeros_like(path[0]), path[0], np.zeros_like(path[0]), np.zeros_like(path[0]), 0.0)
              
         times = [0.0]
         for dist in distances:
@@ -618,15 +643,30 @@ class RRTPlanner:
             T = tf - ti
             
             if T <= 1e-6:
-                return qf, np.zeros_like(qf), np.zeros_like(qf)
+                return qf, np.zeros_like(qf), np.zeros_like(qf), qf, np.zeros_like(qf), np.zeros_like(qf), float(idx + 1)
                 
             tau = t - ti
+            tau_n = tau / T
             
-            # Linear interpolation (constant continuous velocity, zero acceleration breakpoints)
-            q_tau = qi + (qf - qi) * (tau / T)
-            q_dot = (qf - qi) / T
-            q_ddot = np.zeros_like(qf)
+            # Geometric Path Derivations (vs parameter s where segment is strictly idx -> idx+1)
+            qs_dot = qf - qi  # dq/ds 
+            qs_ddot = np.zeros_like(qf) # d2q/ds2
             
-            return q_tau, q_dot, q_ddot
+            # 3rd Order Polynomial timing mapping mapping bounds to s-space
+            tau_poly = 3 * (tau_n**2) - 2 * (tau_n**3)
+            s = float(idx + tau_poly)
+            
+            # Temporal mapping derivatives
+            ds_dt = (6 * tau_n - 6 * (tau_n**2)) / T
+            d2s_dt2 = (6 - 12 * tau_n) / (T**2)
+            
+            # Physical Execution Output (t-space) mapping Chain Rules over 3rd Order bounds
+            qt = qi + qs_dot * tau_poly
+            qs = qt  # Point position evaluates simultaneously identical!
+            
+            qt_dot = qs_dot * ds_dt
+            qt_ddot = qs_dot * d2s_dt2
+            
+            return qt, qt_dot, qt_ddot, qs, qs_dot, qs_ddot, s
             
         return evaluate

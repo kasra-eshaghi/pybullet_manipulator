@@ -127,21 +127,35 @@ def main():
         max_dist = 0.0
         exec_points = []
         
+        t_hist = []
+        qt_hist, qt_dot_hist, qt_ddot_hist = [], [], []
+        qs_hist, qs_dot_hist, qs_ddot_hist = [], [], []
+        s_hist = []
+        
         while current_time <= traj_time:
-            q_t, q_dot_t, q_ddot_t = trajectory_eval(current_time)
+            qt, qt_dot, qt_ddot, qs, qs_dot, qs_ddot, s_val = trajectory_eval(current_time)
             p.setJointMotorControlArray(
                 boxId, active_joints, p.POSITION_CONTROL, 
-                targetPositions=q_t, targetVelocities=q_dot_t,
+                targetPositions=qt, targetVelocities=qt_dot,
                 forces=np.ones(len(active_joints))*100
             )
             p.stepSimulation()
             
+            ee_state = p.getLinkState(boxId, ee_link_id)
+            fk_pos = np.array(ee_state[0])
+            exec_points.append(fk_pos)
+            
+            t_hist.append(current_time)
+            qt_hist.append(qt)
+            qt_dot_hist.append(qt_dot)
+            qt_ddot_hist.append(qt_ddot)
+            qs_hist.append(qs)
+            qs_dot_hist.append(qs_dot)
+            qs_ddot_hist.append(qs_ddot)
+            s_hist.append(s_val)
+            
             if is_constrained:
-                ee_state = p.getLinkState(boxId, ee_link_id)
-                fk_pos = np.array(ee_state[0])
-                exec_points.append(fk_pos)
-                
-                # Project FK position orthogonally onto constraint vector to find TRUE geometric s
+                # Project FK position orthogonally onto constraint vector to find TRUE geometric s deviation
                 vec_a = np.array(s_pos)
                 vec_b = np.array(g_pos)
                 line_vec = vec_b - vec_a
@@ -172,6 +186,144 @@ def main():
                     lid = p.addUserDebugLine(exec_points[i-step_draw].tolist(), exec_points[i].tolist(), lineColorRGB=[1, 0, 1], lineWidth=4)
                     trajectory_line_ids.append(lid)
                     
+        # Analytical Plotting Engine
+        t_arr = np.array(t_hist)
+        s_arr = np.array(s_hist)
+        
+        qt_arr = np.array(qt_hist)
+        qt_dot_arr = np.array(qt_dot_hist)
+        qt_ddot_arr = np.array(qt_ddot_hist)
+        
+        qs_arr = np.array(qs_hist)
+        qs_dot_arr = np.array(qs_dot_hist)
+        qs_ddot_arr = np.array(qs_ddot_hist)
+        
+        xt_arr = np.array(exec_points)
+        
+        if len(t_arr) > 1:
+            # EE Derivatives 
+            xt_dot = np.gradient(xt_arr, t_arr, axis=0) # velocity vs time
+            xt_ddot = np.gradient(xt_dot, t_arr, axis=0) # accel vs time
+            
+            ds_dt = np.gradient(s_arr, t_arr)
+            ds_dt_safe = np.where(np.abs(ds_dt) < 1e-6, 1e-6, ds_dt)
+            
+            xs_dot = xt_dot / ds_dt_safe[:, np.newaxis] # velocity vs s
+            xs_ddot = np.gradient(xs_dot, t_arr, axis=0) / ds_dt_safe[:, np.newaxis] # accel vs s
+            
+            fig, axs = plt.subplots(6, 2, figsize=(16, 24))
+            
+            # Pre-calculate corresponding Time and S values for the actual topological waypoints for plotting demarcations
+            node_s_vals = list(range(len(path)))
+            dists = [planner.distance(path[i], path[i+1]) for i in range(len(path)-1)]
+            tot_dist = sum(dists)
+            node_t_vals = [0.0]
+            if tot_dist > 1e-6:
+                for d in dists:
+                    node_t_vals.append(node_t_vals[-1] + traj_time * d / tot_dist)
+            
+            # --- Column 1: Time Domain ---
+            # 1. Joint angles vs time
+            for i in range(qt_arr.shape[1]):
+                axs[0, 0].plot(t_arr, qt_arr[:, i], label=f'J{i}')
+            axs[0, 0].set_ylabel('Angle (rad)')
+            axs[0, 0].set_title('1. Joint Angles vs Time')
+            
+            # 2. Joint velocity vs time
+            for i in range(qt_dot_arr.shape[1]):
+                axs[1, 0].plot(t_arr, qt_dot_arr[:, i], label=f'J{i}_dot')
+            axs[1, 0].set_ylabel('Velocity (rad/s)')
+            axs[1, 0].set_title('2. Joint Velocities vs Time')
+            
+            # 3. Joint acceleration vs time
+            for i in range(qt_ddot_arr.shape[1]):
+                axs[2, 0].plot(t_arr, qt_ddot_arr[:, i], label=f'J{i}_ddot')
+            axs[2, 0].set_ylabel('Accel (rad/s^2)')
+            axs[2, 0].set_title('3. Joint Accelerations vs Time')
+            
+            # 4. EE pos vs time
+            axs[3, 0].plot(t_arr, xt_arr[:, 0], label='X')
+            axs[3, 0].plot(t_arr, xt_arr[:, 1], label='Y')
+            axs[3, 0].plot(t_arr, xt_arr[:, 2], label='Z')
+            axs[3, 0].set_ylabel('Position (m)')
+            axs[3, 0].set_title('4. EE Position vs Time')
+            
+            # 5. EE vel vs time
+            axs[4, 0].plot(t_arr, xt_dot[:, 0], label='X_dot')
+            axs[4, 0].plot(t_arr, xt_dot[:, 1], label='Y_dot')
+            axs[4, 0].plot(t_arr, xt_dot[:, 2], label='Z_dot')
+            axs[4, 0].set_ylabel('Velocity (m/s)')
+            axs[4, 0].set_title('5. EE Velocity vs Time')
+            
+            # 6. EE accel vs time
+            axs[5, 0].plot(t_arr, xt_ddot[:, 0], label='X_ddot')
+            axs[5, 0].plot(t_arr, xt_ddot[:, 1], label='Y_ddot')
+            axs[5, 0].plot(t_arr, xt_ddot[:, 2], label='Z_ddot')
+            axs[5, 0].set_ylabel('Accel (m/s^2)')
+            axs[5, 0].set_title('6. EE Acceleration vs Time')
+            
+            # --- Column 2: S-Space Domain ---
+            # 7. Joint angles vs s
+            for i in range(qs_arr.shape[1]):
+                axs[0, 1].plot(s_arr, qs_arr[:, i], label=f'J{i}')
+            axs[0, 1].set_ylabel('Angle (rad)')
+            axs[0, 1].set_title('7. Joint Angles vs s')
+            
+            # 8. Joint velocity vs s 
+            for i in range(qs_dot_arr.shape[1]):
+                axs[1, 1].plot(s_arr, qs_dot_arr[:, i], label=f'J{i}_dot')
+            axs[1, 1].set_ylabel('Velocity (dq/ds)')
+            axs[1, 1].set_title('8. Joint Velocities vs s')
+            
+            # 9. Joint acceleration vs s
+            for i in range(qs_ddot_arr.shape[1]):
+                axs[2, 1].plot(s_arr, qs_ddot_arr[:, i], label=f'J{i}_ddot')
+            axs[2, 1].set_ylabel('Accel (d2q/ds2)')
+            axs[2, 1].set_title('9. Joint Accelerations vs s')
+            
+            # 10. EE pos vs s
+            axs[3, 1].plot(s_arr, xt_arr[:, 0], label='X')
+            axs[3, 1].plot(s_arr, xt_arr[:, 1], label='Y')
+            axs[3, 1].plot(s_arr, xt_arr[:, 2], label='Z')
+            axs[3, 1].set_ylabel('Position (m)')
+            axs[3, 1].set_title('10. EE Position vs s')
+            
+            # 11. EE vel vs s
+            axs[4, 1].plot(s_arr, xs_dot[:, 0], label='X_dot')
+            axs[4, 1].plot(s_arr, xs_dot[:, 1], label='Y_dot')
+            axs[4, 1].plot(s_arr, xs_dot[:, 2], label='Z_dot')
+            axs[4, 1].set_ylabel('Velocity (dx/ds)')
+            axs[4, 1].set_title('11. EE Velocity vs s')
+            
+            # 12. EE accel vs s
+            axs[5, 1].plot(s_arr, xs_ddot[:, 0], label='X_ddot')
+            axs[5, 1].plot(s_arr, xs_ddot[:, 1], label='Y_ddot')
+            axs[5, 1].plot(s_arr, xs_ddot[:, 2], label='Z_ddot')
+            axs[5, 1].set_ylabel('Accel (d2x/ds2)')
+            axs[5, 1].set_title('12. EE Acceleration vs s')
+            
+            # Formatting and Legends
+            for row in range(6):
+                for col in range(2):
+                    n_vals = node_t_vals if col == 0 else node_s_vals
+                    for nv in n_vals:
+                        axs[row, col].axvline(x=nv, color='gray', linestyle='--', alpha=0.5)
+                        
+                    if col == 0:
+                        axs[row, col].set_xlim(-0.05 * traj_time, 1.05 * traj_time)
+                    else:
+                        axs[row, col].set_xlim(-0.05, len(path) - 1 + 0.05)
+                        
+                    axs[row, col].legend(loc='upper right', fontsize='x-small', ncol=3)
+                    
+                    if row < 5:
+                        axs[row, col].set_xticklabels([])
+                    else:
+                        axs[row, col].set_xlabel('Time (s)' if col == 0 else 'Task Space Fraction (s)')
+                        
+            plt.subplots_adjust(hspace=0.4)
+            plt.tight_layout(h_pad=1.5)
+            plt.show(block=False)
 
     try:
         while True:
