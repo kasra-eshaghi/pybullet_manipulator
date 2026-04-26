@@ -604,14 +604,14 @@ class RRTPlanner:
         print(f"Smoothed constrained path down to {len(smoothed_path)} waypoints")
         return smoothed_path
 
-    def generate_trajectory(self, path: list, total_time: float):
+    def generate_trajectory(self, path: list, total_time: float, use_smoothing: bool = False):
         if not path:
             return None
             
         num_waypoints = len(path)
         if num_waypoints == 1:
-            return lambda t: (path[0], np.zeros_like(path[0]), np.zeros_like(path[0]))
-            
+             return lambda t: (path[0], np.zeros_like(path[0]), np.zeros_like(path[0]), path[0], np.zeros_like(path[0]), np.zeros_like(path[0]), 0.0)
+             
         distances = []
         for i in range(num_waypoints - 1):
             distances.append(self.distance(path[i], path[i+1]))
@@ -627,13 +627,28 @@ class RRTPlanner:
         def evaluate(t: float):
             t = np.clip(t, 0.0, total_time)
             
+            if use_smoothing:
+                # Option 1: Map overall timeline mapping across a seamless 3rd-order spatial profile globally
+                t_norm = t / total_time
+                t_virtual_norm = 3 * (t_norm**2) - 2 * (t_norm**3)
+                t_virtual = t_virtual_norm * total_time
+                
+                # Native derivatives over Global Space (Chain Rules)
+                dt_virt_dt = (6 * t_norm - 6 * (t_norm**2)) / total_time * total_time
+                d2t_virt_dt2 = (6 - 12 * t_norm) / (total_time**2) * total_time
+            else:
+                # Execution halts implicitly at boundaries (isolated segmented interpolation)
+                t_virtual = t
+                dt_virt_dt = 1.0
+                d2t_virt_dt2 = 0.0
+            
             idx = 0
             for i in range(num_waypoints - 1):
-                if t <= times[i+1]:
+                if t_virtual <= times[i+1]:
                     idx = i
                     break
             
-            if t >= times[-1]:
+            if t_virtual >= times[-1]:
                 idx = num_waypoints - 2
                 
             qi = path[idx]
@@ -645,27 +660,37 @@ class RRTPlanner:
             if T <= 1e-6:
                 return qf, np.zeros_like(qf), np.zeros_like(qf), qf, np.zeros_like(qf), np.zeros_like(qf), float(idx + 1)
                 
-            tau = t - ti
+            tau = t_virtual - ti
             tau_n = tau / T
             
             # Geometric Path Derivations (vs parameter s where segment is strictly idx -> idx+1)
             qs_dot = qf - qi  # dq/ds 
             qs_ddot = np.zeros_like(qf) # d2q/ds2
             
-            # 3rd Order Polynomial timing mapping mapping bounds to s-space
-            tau_poly = 3 * (tau_n**2) - 2 * (tau_n**3)
-            s = float(idx + tau_poly)
-            
-            # Temporal mapping derivatives
-            ds_dt = (6 * tau_n - 6 * (tau_n**2)) / T
-            d2s_dt2 = (6 - 12 * tau_n) / (T**2)
-            
-            # Physical Execution Output (t-space) mapping Chain Rules over 3rd Order bounds
-            qt = qi + qs_dot * tau_poly
-            qs = qt  # Point position evaluates simultaneously identical!
-            
-            qt_dot = qs_dot * ds_dt
-            qt_ddot = qs_dot * d2s_dt2
+            if not use_smoothing:
+                # 3rd Order Polynomial timing mapping bounds to s-space LOCALLY
+                tau_poly = 3 * (tau_n**2) - 2 * (tau_n**3)
+                s = float(idx + tau_poly)
+                
+                dtau_poly_dt = (6 * tau_n - 6 * (tau_n**2)) / T
+                d2tau_poly_dt2 = (6 - 12 * tau_n) / (T**2)
+                
+                qt = qi + qs_dot * tau_poly
+                qs = qt
+                
+                qt_dot = qs_dot * dtau_poly_dt
+                qt_ddot = qs_dot * d2tau_poly_dt2
+            else:
+                # Global mapping execution (Linear topological traversing driven by global mapped timing!)
+                s = float(idx + tau_n)
+                
+                dq_dt_virt = qs_dot / T
+                
+                qt = qi + qs_dot * tau_n
+                qs = qt
+                
+                qt_dot = dq_dt_virt * dt_virt_dt
+                qt_ddot = 0.0 + dq_dt_virt * d2t_virt_dt2
             
             return qt, qt_dot, qt_ddot, qs, qs_dot, qs_ddot, s
             

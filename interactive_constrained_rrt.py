@@ -121,7 +121,7 @@ def main():
     trajectory_line_ids = []
     
     def execute_trajectory(path, traj_time=5.0, is_constrained=False, s_pos=None, g_pos=None):
-        trajectory_eval = planner.generate_trajectory(path, traj_time)
+        trajectory_eval = planner.generate_trajectory(path, traj_time, use_smoothing=True)
         current_time = 0.0
         
         max_dist = 0.0
