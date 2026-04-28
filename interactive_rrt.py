@@ -14,10 +14,40 @@ def main():
     planeId = p.loadURDF("plane.urdf")
     base_pos = [0, 0, 0]
     base_orn = p.getQuaternionFromEuler([0, 0, 0])
-    boxId = p.loadURDF("franka_panda/panda.urdf", base_pos, base_orn, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
+    robot = "ur10"
+    if robot == "panda":
+        ee_link_name = "panda_grasptarget"
+        boxId = p.loadURDF("franka_panda/panda.urdf", base_pos, base_orn, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
+        # reset position of robot
+        active_joints = []
+        for i in range(p.getNumJoints(boxId)):
+            joint_info = p.getJointInfo(boxId, i)
+            joint_type = joint_info[2]
+            if joint_type == 0 or joint_type == 1: 
+                active_joints.append(joint_info[0])
+                ll, ul = joint_info[8], joint_info[9]
+                if ll >= ul:
+                    ll, ul = -3.14159, 3.14159
+                mid_val = (ll + ul) / 2.0
+                p.resetJointState(boxId, i, mid_val)
+        p.stepSimulation()
+    elif robot == "ur10":
+        ee_link_name = "tcp_link"
+        boxId = p.loadURDF("welding_robot2.urdf", base_pos, base_orn, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
+
+        # reset position of robot
+        active_joints = []
+        reset_angles = [0, -1.57, 1.57, -1.57, -1.57, 0]
+        
+        for i in range(p.getNumJoints(boxId)):
+            joint_info = p.getJointInfo(boxId, i)
+            joint_type = joint_info[2]
+            if joint_type == 0 or joint_type == 1: 
+                active_joints.append(joint_info[0])
+                p.resetJointState(boxId, i, reset_angles[len(active_joints)-1])
+        p.stepSimulation()
 
     # find ee_link name 
-    ee_link_name = "panda_grasptarget"
     ee_link_id = None
     for i in range(p.getNumJoints(boxId)):
         joint_info = p.getJointInfo(boxId, i)            
@@ -25,22 +55,6 @@ def main():
             ee_link_id = joint_info[0]
     if ee_link_id is None:
         raise ValueError("EE link not found")
-
-    # reset position of robot
-    active_joints = []
-    limits = []
-    for i in range(p.getNumJoints(boxId)):
-        joint_info = p.getJointInfo(boxId, i)
-        joint_type = joint_info[2]
-        if joint_type == 0 or joint_type == 1: 
-            active_joints.append(joint_info[0])
-            ll, ul = joint_info[8], joint_info[9]
-            if ll >= ul:
-                ll, ul = -3.14159, 3.14159
-            limits.append((ll, ul))
-            mid_val = (ll + ul) / 2.0
-            p.resetJointState(boxId, i, mid_val)
-    p.stepSimulation()
 
     # get state of ee_link
     ee_state = p.getLinkState(boxId, ee_link_id)
@@ -101,9 +115,10 @@ def main():
     update_gui_obstacle()
     
     # create path planner
+    urdf_path = "franka_panda/panda.urdf" if robot == "panda" else "welding_robot2.urdf"
     planner = RRTPlanner(
-        urdf_path="franka_panda/panda.urdf", 
-        ee_link_name="panda_grasptarget",
+        urdf_path=urdf_path, 
+        ee_link_name=ee_link_name,
         base_pos=base_pos, 
         base_orn=base_orn, 
         config_path="rrt_config.yaml"
@@ -161,12 +176,13 @@ def main():
                     current_time = 0.0
                     qs_hist = np.empty((0, len(qi)))
                     
+                    max_forces = [p.getJointInfo(boxId, j)[10] for j in active_joints]
                     while current_time <= traj_time:
-                        q_t, q_dot_t, _ = trajectory_eval(current_time)
+                        qt, qt_dot, qt_ddot, qs, qs_dot, qs_ddot, _ = trajectory_eval(current_time)
                         p.setJointMotorControlArray(
                             boxId, active_joints, p.POSITION_CONTROL, 
-                            targetPositions=q_t, targetVelocities=q_dot_t,
-                            forces=np.ones(len(active_joints))*100
+                            targetPositions=qt, targetVelocities=qt_dot,
+                            forces=max_forces
                         )
                         p.stepSimulation()
                         time.sleep(1./240.)

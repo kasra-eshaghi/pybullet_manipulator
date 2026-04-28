@@ -18,6 +18,7 @@ class RRTPlanner:
         
         self.robot_id = p.loadURDF(urdf_path, basePosition=base_pos, baseOrientation=base_orn, useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION, physicsClientId=self.client_id)
         
+        self.plane_id = p.loadURDF("plane.urdf", [0, 0, 0], physicsClientId=self.client_id)
 
         # find active joints
         num_joints = p.getNumJoints(self.robot_id, physicsClientId=self.client_id)
@@ -35,7 +36,7 @@ class RRTPlanner:
         if self.ee_link_id is None:
             raise ValueError(f"End effector link '{ee_link_name}' not found in URDF.")
         
-        self.obstacle_ids = []
+        self.obstacle_ids = [self.plane_id]
         self.dynamic_obs_id = None
         
         with open(config_path, 'r') as f:
@@ -141,6 +142,15 @@ class RRTPlanner:
             linkA = pt[3]
             linkB = pt[4]
             if not self._are_links_close_kinematically(linkA, linkB, max_dist=2):
+                return True
+            
+        for obs_id in self.obstacle_ids:
+            pts = p.getContactPoints(bodyA=self.robot_id, bodyB=obs_id, physicsClientId=self.client_id)
+            if obs_id == self.plane_id:
+                for pt in pts:
+                    if pt[3] > 1 and pt[3] != 10:
+                        return True
+            elif len(pts) > 0:
                 return True
             
         if self.dynamic_obs_id is not None:
@@ -392,7 +402,7 @@ class RRTPlanner:
         valid_goal_qs = self._get_ik_solutions(t_pos, target_quat, self.ik_retries)
                 
         if not valid_goal_qs:
-            print("Failed to pull any valid collision-free IK distributions from Null-Space.")
+            print("Failed to pull any valid collision-free IK distributions.")
             return []
         else:
             print(f"Valid Distinct IK Solution Extracted: {len(valid_goal_qs)} solutions")

@@ -18,7 +18,7 @@ def main():
     # useFixedBase=True anchors the base of the robot to the world
     print("Loading welding_robot.urdf...")
     try:
-        robot_id = p.loadURDF("welding_robot.urdf", [0, 0, 0], [0, 0, 0, 1], useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
+        robot_id = p.loadURDF("welding_robot2.urdf", [0, 0, 0], [0, 0, 0, 1], useFixedBase=True, flags=p.URDF_USE_SELF_COLLISION)
     except Exception as e:
         print(f"Failed to load URDF: {e}")
         p.disconnect()

@@ -261,12 +261,14 @@
     <limit effort="56.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.141592653589793"/>
     <dynamics damping="0" friction="0"/>
   </joint>
+  <!--
   <link name="ft_frame"/>
   <joint name="wrist_3_link-ft_frame" type="fixed">
     <parent link="wrist_3_link"/>
     <child link="ft_frame"/>
     <origin rpy="3.141592653589793 0 0" xyz="0 0 0"/>
   </joint>
+  -->
   <!-- ROS-Industrial 'base' frame - base_link to UR 'Base' Coordinates transform -->
   <link name="base"/>
   <joint name="base_link-base_fixed_joint" type="fixed">
@@ -280,26 +282,31 @@
     <child link="base"/>
   </joint>
   <!-- ROS-Industrial 'flange' frame - attachment point for EEF models -->
+  <!--
   <link name="flange"/>
   <joint name="wrist_3-flange" type="fixed">
     <parent link="wrist_3_link"/>
     <child link="flange"/>
     <origin rpy="0 -1.5707963267948966 -1.5707963267948966" xyz="0 0 0"/>
   </joint>
+  -->
   <!-- ROS-Industrial 'tool0' frame - all-zeros tool frame -->
+  <!--
   <link name="tool0"/>
   <joint name="flange-tool0" type="fixed">
-    <!-- default toolframe - X+ left, Y+ up, Z+ front -->
     <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0 0 0"/>
     <parent link="flange"/>
     <child link="tool0"/>
   </joint>
+  -->
   <!-- Flange extension -->
-  <link name="flange_extension">
+
+  
+  <link name="welding_torch">
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="CAD_files/bracket.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="CAD_files/torch.STL" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="gray">
         <color rgba="0.5 0.5 0.5 1.0"/>
@@ -308,7 +315,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="CAD_files/bracket.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="CAD_files/torch.STL" scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
     <inertial>
@@ -317,39 +324,17 @@
       <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0001" iyz="0.0" izz="0.0001"/>
     </inertial>
   </link>
-  <joint name="tool0-flange_extension" type="fixed">
-    <parent link="tool0"/>
-    <child link="flange_extension"/>
-    <origin rpy="0 1.57 1.57" xyz="0 0 0"/>
-  </joint>
-  <!-- 
-  <link name="welding_torch">
-    <visual>
-      <origin rpy="0 0 0" xyz="0 0 0"/>
-      <geometry>
-        <mesh filename="CAD_files/Binzel Segment Holder Abirob A300 ECO.STL" scale="0.001 0.001 0.001"/>
-      </geometry>
-      <material name="gray">
-        <color rgba="0.5 0.5 0.5 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin rpy="0 0 0" xyz="0 0 0"/>
-      <geometry>
-        <mesh filename="CAD_files/Binzel Segment Holder Abirob A300 ECO.STL" scale="0.001 0.001 0.001"/>
-      </geometry>
-    </collision>
-  </link>
   <joint name="torch_joint" type="fixed">
-    <parent link="flange_extension"/>
+    <parent link="wrist_3_link"/>
     <child link="welding_torch"/>
-    <origin rpy="0 0 0" xyz="0.04 0.04 0"/>
+    <origin rpy="0 0 3.14" xyz="0.04 0.04 0"/>
   </joint>
+  
   <link name="tcp_link"/>
   <joint name="tcp_joint" type="fixed">
     <parent link="welding_torch"/>
     <child link="tcp_link"/>
     <origin rpy="0.9 0 0" xyz="0.04 0.04 0.435"/>
   </joint>
-  -->
+
 </robot>

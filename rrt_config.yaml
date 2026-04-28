@@ -16,7 +16,7 @@ planner:
   # Use 'null' to keep the default URDF limit.
   custom_limits:
     - null
-    - [-3.14, 3.14] # Expand panda_joint2 sampling range
+    - null
     - null
     - null
     - null
